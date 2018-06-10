@@ -284,6 +284,8 @@ void handle(int acceptfd, char *buf)
     /*The displacement of the target directory relative
      * to the beginning of input name*/
     rel = p - inputname + 1;
+    if(p == inputname)
+        rel--;
 
     dir = opendir(inputname);
     if(dir == NULL)
