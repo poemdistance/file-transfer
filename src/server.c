@@ -13,14 +13,15 @@
 #include <sys/stat.h>   //stat
 #include <dirent.h>     //opendir
 
-#define END 4    //ending of header.len
+#define END sprintf(NoneUse, "%d", BUFLEN)
 #define BACKLOG 5
 #define PORT "2326"
 #define PATH_LEN 512
-#define BUFLEN 4096+HEADLEN
+#define BUFLEN 4096
 
 int rel = 0;
 char desname[PATH_LEN];
+char NoneUse[10];
 
 struct timespec start_t, finish_t;
 

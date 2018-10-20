@@ -11,11 +11,11 @@
 #include <sys/stat.h>   //mkdir
 #include <time.h>
 
-#define END 4
+#define END sprintf(NoneUse, "%d", BUFLEN)
 #define BACKLOG 5
 #define PORT "2326"
 #define PATH_LEN 256
-#define BUFLEN 4096+HEADLEN
+#define BUFLEN 4096
 
 struct Header{
     char type;      //0:document, 1:directory 2:content
@@ -24,6 +24,7 @@ struct Header{
 } header;
 
 struct timespec starttime, endtime;
+char NoneUse[10];
 int HEADLEN = sizeof(header);
 int oa = 0; //overwrite all
 
@@ -79,11 +80,11 @@ void writein(int sockfd, FILE *fp, char *buf, char *fname)
     int wsum = 0;   //write sum
     int rsum = 0;   //read sum
     int i = 0;
-    //int times = 0;
+    int times = 0;
 
     header.flag = '0';
 
-    printf("in writein\n");
+    printf("In writein function\n", buf);
     while(1)
     {
         flag = 1;
@@ -91,45 +92,52 @@ void writein(int sockfd, FILE *fp, char *buf, char *fname)
         remain = BUFLEN;
         memset(&header, 0, HEADLEN);
 
-        /*don't put it into next loop it will clear the data it receive before*/
+        /*don't put it into next loop, it will clear the data before it receive all*/
         memset(buf, 0, BUFLEN); 
+        printf("times=%d    ",times++); //log
 
+        int temp = 0;
         while(1)
         {
+            printf("loop=%d    ", temp++);  //log
+
             if((recvlen = recv(sockfd, buf+flen, remain, 0)) < 0)
                 perror("recv");
+            printf("recvlen=%d", recvlen);
+            printf(" buf=%s\n", buf);
+
+            flen = recvlen + flen;  //finish length
+            remain = BUFLEN - flen; //remaining length
 
             /*must enssure we receive fully header or we might be obtain wrong header.len*/
-            if(flag && recvlen > HEADLEN)
+            if(flag && (flen > HEADLEN))
             {
                 flag = 0;
                 header.flag = buf[1];
 
-                for(i=0; i<4; i++)
-                    header.len[i] = buf[i+2];
+                /*buf[0] & buf[1] are both flag. so start from buf[2]*/
+                for(i=0; i<END; i++)
+                    header.len[i] = buf[i+2];   
 
-                header.len[4] = '\0';
+                header.len[END] = '\0';
 
                 if(atoi(header.len) != BUFLEN-HEADLEN)
                 {
                     if(atoi(header.len) == 0)
                     {
-                        printf("NULL doc\n");
-                        return;
+                        //printf("buff=%s NULL doc header.len = %d\n",buf, atoi(header.len));
+                        //return;
+                        printf("Oh, god\n");
+                        for(i=0; i<4096; i++)
+                            printf("%c", buf[i]);
+                        exit(1);
                     }
-                    /*printf("times=%d\theader.len=%d\twritelen=%d\n",times,\
-                        atoi(header.len), writelen); */  //log
                 }
             }
-
-            flen = recvlen + flen;  //finish length
-            remain = BUFLEN - flen; //remaining length
 
             if(remain == 0)
                 break;
         }
-        //printf("times=%d\t",times++); //log
-
         rsum += atoi(header.len);
         if((writelen = fwrite(buf+HEADLEN, sizeof(char),\
                         atoi(header.len), fp)) != atoi(header.len))
@@ -138,6 +146,7 @@ void writein(int sockfd, FILE *fp, char *buf, char *fname)
             exit(1);
         }
         wsum = wsum + writelen;
+        printf("\n");
         //printf("header.len=%d\twritelen=%d\n",atoi(header.len), writelen); //log
 
         if(header.flag == '1')
@@ -230,7 +239,7 @@ int main(int argc, char **argv)
         memset(fname, 0, PATH_LEN);
         memset(&header, 0, HEADLEN);
 
-        /*Loop until all data is sent*/
+        /*Loop until all data is received*/
         while(1)
         {
             if((recvlen = recv(sockfd, buf+flen, remain, 0)) > 0)
@@ -271,7 +280,7 @@ int main(int argc, char **argv)
 
         if(header.type == '0')
         {
-            if(!oa)
+            if(!oa)             /*oa: 'overwrite all' flag*/
                 fstatus(fname); /*detect file status*/
 
             FILE *fp = fopen(fname, "wb");
