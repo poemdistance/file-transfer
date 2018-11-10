@@ -1,3 +1,9 @@
+# 此次更新相关事项：
+* 修复了server端多次数据发送中可能导致发送失败的逻辑错误
+* 添加了链接文件跟随 & 非跟随传输功能, 默认不跟随传输，如果需要跟随传输, 请添加-f参数
+* 用switch改写了文件状态检测fstatus函数, 并去除了存在bug和无意义的rename功能
+* 优化部分代码，并增加了代码修改的便捷性，可直接修改发送缓冲BUFLEN的大小而不必修改其他部分
+
 # 程序功能:
 
 * 在局域网中的设备间进行文件传输，支持单个文件和和整个文件夹的传输，比如连接同一个wifi的电脑和电脑，手  
@@ -37,6 +43,12 @@
 **点击图片观看演示视频**
 
 [![IMAGE ALT TEXT HERE](https://img.youtube.com/vi/aPkljt47N_s/0.jpg)](https://www.youtube.com/watch?v=aPkljt47N_s)
+
+# Related matters for this update:
+* Fixed a logic error that may cause a send failure in multiple data transmissions on the server side.
+* Added link file follow & non-following transfer function, default does not follow transfer, if you need to follow transfer, please add '-f' parameter
+* Rewritten the file state detection 'fstatus' function with switch, and removed the wrong and meaningless rename function
+* Optimize part of the code, and increase the convenience of code modification, you can directly modify the size of the send buffer 'BUFLEN' without having to modify other parts
 
 # Program Function: 
 * Transfer files between devices under the local area network. support single file and the whole folder transfer.  
