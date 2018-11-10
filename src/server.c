@@ -13,81 +13,146 @@
 #include <sys/stat.h>   //stat
 #include <dirent.h>     //opendir
 
-#define END sprintf(NoneUse, "%d", BUFLEN)
 #define BACKLOG 5
 #define PORT "2326"
 #define PATH_LEN 512
-#define BUFLEN 4096
+#define BUFLEN 1024*64
+#define END sprintf(NoneUse, "%d", BUFLEN)
+
+#define ISDOC     "0"
+#define ISDIR     "1"
+#define ISCONTENT "2"
+#define SYMLNK_F  "3"   //Follow symbol link
+#define SYMLNK_N  "4"   //Do not follow symbol link
+#define UNFINISH  "0"
+#define FINISH    "1"
+#define ALLDONE   "2"
+
+#define SEND 's'
+#define RECV 'r'
 
 int rel = 0;
 char desname[PATH_LEN];
-char NoneUse[10];
+char NoneUse[20];
 
 struct timespec start_t, finish_t;
 
 struct Header{
-    char type;      //0:document, 1:directory 2:content
+    char type;      //0:document, 1:directory 2:content 3/4:symbol link
     char flag;      //0:unfinish, 1:finished, 2:all done
-    char len[10];   //the length of content
+    char len[20];   //the length of content
 } header;
 
 int HEADLEN = sizeof(header);
 
+struct Parameters {
+    char action;
+    char symlnkmod;
+    char addr[20];
+    char target[PATH_LEN];
+} param;
+
+/*Now it's only support parameter '-f' & '-h'*/
+void help_info(char *executablefile)
+{
+    printf("Usage: %s [option] ...\n\n", executablefile);
+    printf("-s --send. As server to send files\n");
+    printf("-r --receive. As client to receive files\n");
+    printf("-a --address. Must add server address after this option\n");
+    printf("-f --follow. Following symbol link when transfer a symlink file\n");
+    printf("-t --target. Using for server, assigning the transfer files before connection establish\n");
+    printf("-h --help print this help message\n\n");
+}
+void extract_argv(int argc,char **argv)
+{
+    char *p = NULL;
+    int i=0;
+    for(i=0; i<argc; i++)
+    {
+        printf("%s\n", argv[i]);
+
+        p = argv[i];
+        while(*p)
+        {
+            if(*p == '-')
+            {
+                switch(*(p+1))
+                {
+                    case 'a': strcpy(param.addr, argv[++i]);     break;
+                    case 't': strcpy(param.target, argv[++i]);   break;
+                    case 'r': param.action = RECV;               break;
+                    case 's': param.action = SEND;               break;
+                    case 'f': param.symlnkmod  = *SYMLNK_F;      break;
+                    case 'h': help_info(argv[0]);                exit(0);
+
+                    default:
+                              printf("Input error\n"); help_info(argv[0]);
+                              exit(1);
+                }
+            }
+            p++;
+        }
+    }
+}
+
 int sendname(char *file, int *acceptfd, char *type, char *buf)
 {
+    printf("Send file name=%s ", file);
     memset(desname, 0, PATH_LEN);
     memset(&header, 0, sizeof(header));
     memset(buf, 0, BUFLEN);
-    header.flag = '1';
-
-    if(strcmp(type, "dir") == 0)
-        header.type = '1';
-    else if(strcmp(type, "doc") == 0)
-        header.type = '0';
-    else
-        return -1;
+    header.flag = *FINISH;
+    header.type = *type;
 
     char *p = file + rel;   
 
     /*abstract target file name to 'desname'(des:destination)*/
     strcat(desname, p);    
 
-    int len = strlen(desname);
-    sprintf(header.len, "%d", len); //convert integer type to string
+    struct stat st;
+    lstat(file, &st);
+    if(header.type == *SYMLNK_F)
+        stat(file, &st);
+
+    buf[HEADLEN] = '\0';
+    sprintf(header.len, "%ld",st.st_size);
     strcpy(buf, (char*)&header);
     strcat(buf+sizeof(header), desname);
 
+    printf("buf=%s\n", buf);
     int sendlen;
     if((sendlen = send(*acceptfd, buf, BUFLEN, 0)) == -1)
-    {
         perror("send file name");
-    }
-    printf("desname=%s sendlen=%d\n\n", p, sendlen);
+
     return 1;
 }
 
 void finish(int *acceptfd, char *buf)
 {
     memset(buf, 0, BUFLEN);
-    header.flag = '2';
+    header.flag = *ALLDONE;
     strcpy(buf, (char*)&header);
     if(send(*acceptfd, buf, BUFLEN, 0) > 0)
-    {
-        printf("\nAll files send successful, send finish flag done\n");
-    }
+        printf("\nAll files send successful.\n");
     else 
-        printf("\nSend finish flag failed\n");
+        printf("\nSend finish flag failed.\n");
 }
 
 int sendfile(char *file, int *acceptfd, char *type, char *buf)
 {
-    printf("\npath=%s\t", file);
     if(strcmp(type, "dir") == 0)
-        return sendname(file, acceptfd, type, buf);
-
+        return sendname(file, acceptfd, ISDIR, buf);
     else if(strcmp(type, "doc") == 0)
     {
-        if(sendname(file, acceptfd, type, buf) != 1)
+        if(sendname(file, acceptfd, ISDOC, buf) != 1)
+        {
+            fprintf(stderr, "File name send failed\n");
+            return -1;
+        }
+    }
+    else if(strcmp(type, "symlink") == 0)
+    {
+        if(sendname(file, acceptfd, SYMLNK_N, buf) != 1)
         {
             fprintf(stderr, "File name send failed\n");
             return -1;
@@ -100,43 +165,54 @@ int sendfile(char *file, int *acceptfd, char *type, char *buf)
     }
 
     struct stat st;
+    FILE *fr = NULL;
     int loop = 1;   //loop times
-    stat(file, &st);
+    int flag = 0;
+    char *b = buf;
+    char *h = (char*)&header;
+    char *start; 
+    int sendlen = 0;
+    int readlen = 0;
+    int remain =  0;//remaining len
+    int flen =  0;  //finish len
+    long sum = 0;
+
+    memset(&header, 0, HEADLEN);
+    memset(buf, 0, BUFLEN);
+
+    lstat(file, &st);
+    header.type = *SYMLNK_N;
+
+    /*when file isn't symlink or we follow symlink,
+     *treat it as doc*/
+    if(param.symlnkmod == *SYMLNK_F || \
+            !S_ISLNK(st.st_mode))
+    {
+        flag = 1;
+        stat(file, &st);
+        header.type = *ISCONTENT;
+        fr = fopen(file, "rb");
+        assert(fr != NULL);
+    }
+
+    if(st.st_size == 0)
+    {
+        printf("empty doc '%s' no need to write\n", file);
+        return 1;
+    }
 
     if(st.st_size > BUFLEN)
     {
         loop = st.st_size / (BUFLEN - HEADLEN);
-
         /*st.st_size is not an integer multiple of BUFLEN, loop++*/
         if(st.st_size % (BUFLEN - HEADLEN) != 0)
             loop++;
     }
 
-    FILE *fr = fopen(file, "rb");
-    assert(fr != NULL);
-
-    int HEADLEN = sizeof(header);
-    char *b = buf;
-    char *h = (char*)&header;
-
-    /*the start insert address of content*/
-    char *start; 
-    int sendlen = 0;
-    int readlen = 0;
-    int remain =  0;
-    int flen =  0;
-    int sum = 0;
-    int times = 1;
-
-    memset(&header, 0, HEADLEN);
-    header.flag = '0';    //unfinish
-    header.type = '2';    //content
+    header.flag = *UNFINISH;
     sprintf(header.len, "%d", BUFLEN-HEADLEN);
-
-    /*add ending flag*/
     header.len[END] = '\0';  
 
-    memset(buf, 0, BUFLEN);
     strcpy(buf, (char*)&header);
 
     /*Send the data with header and fixed length*/
@@ -144,39 +220,47 @@ int sendfile(char *file, int *acceptfd, char *type, char *buf)
     {
         memset(buf+HEADLEN, 0, BUFLEN-HEADLEN);
 
-        if((readlen = fread(buf+HEADLEN, sizeof(char), BUFLEN-HEADLEN, fr)) < 0)
+        if(flag == 1)
         {
-            fprintf(stderr, "fread error, exit...\n");
-            printf("Waiting for new request...\n");
-            fclose(fr);
-            exit(1);
+            if((readlen = fread(buf+HEADLEN, sizeof(char), BUFLEN-HEADLEN, fr)) < 0)
+            {
+                fprintf(stderr, "fread error, exit...\n");
+                printf("Waiting for new request...\n");
+                fclose(fr);
+                exit(1);
+            }
+        }
+        else 
+        {
+            if((readlen = readlink(file, buf+HEADLEN, BUFLEN-HEADLEN)) < 0)
+            {
+                fprintf(stderr, "readlink error, exit...\n");
+                printf("Waiting for new request...\n");
+                exit(1);
+            }
         }
 
         if(loop != 1 && readlen != (BUFLEN-HEADLEN) )
         {
-            fprintf(stderr, "Read file length error in sendfile function\n");
+            fprintf(stderr, "Func sendfile: read file length error\n");
             exit(1);
         }
 
-        if(loop == 1)             //last transmit
+        if(loop == 1)     //last transmit
         {
-            header.flag = '1';    //finish flag
+            header.flag = *FINISH;
             buf[1] = header.flag;
 
             sprintf(header.len, "%d", readlen);
-
-            /*add ending flag*/
             header.len[END] = '\0';  
 
             /*insert header*/
-            for(b=buf+2*sizeof(char), h=(char*)&header+2*sizeof(char);\
-                    b<buf+HEADLEN; b++, h++)
-            {
-                *b = *h;
-            }
-        }
+            b=buf+2*sizeof(char);
+            h=(char*)&header+2*sizeof(char);
 
-        printf("times=%d\t", times++);
+            for(; b<buf+HEADLEN; b++, h++) 
+                *b = *h;
+        }
 
         start = buf;
         remain = BUFLEN;
@@ -186,22 +270,27 @@ int sendfile(char *file, int *acceptfd, char *type, char *buf)
         /*Loop until all data is sent*/
         for(;remain != 0; start += flen)
         {
-            if((sendlen = send(*acceptfd, start, BUFLEN-flen, 0)) == -1)
+            if((sendlen = send(*acceptfd, start, remain, 0)) == -1)
             {
                 perror("send");
                 printf("Waiting for new request...\n");
                 exit(1);
             }
-            printf("header.len=%d, sendlen=%d\n", atoi(header.len), sendlen);
-            remain = BUFLEN - sendlen;
-            flen = sendlen;
+            printf("sendlen=%d buf=%s\n", sendlen, buf);   //log
+
+            flen = sendlen + flen;
+            remain = BUFLEN - flen;
         }
 
         if(--loop == 0)
             break;
-    }
-    fclose(fr);
-    printf("Data transfered successful, sent length sum = %d\n", sum);
+
+    }//while loop
+
+    if(fr != NULL)
+        fclose(fr);
+
+    printf("\n\n");
     return 1;
 }
 
@@ -209,11 +298,18 @@ int sendfile(char *file, int *acceptfd, char *type, char *buf)
 void listdir(DIR *dir, char *path, int *acceptfd, char *buf)
 {
     struct dirent *dent;
+    struct stat st;
     DIR *tmpdir;
     char tpath[PATH_LEN] = { '\0' };
+    int status;
 
     /*send directory name*/
-    sendfile(path, acceptfd, "dir", buf);
+    status = sendfile(path, acceptfd, "dir", buf);
+    if(status != 1)
+    {
+        printf("sendfile failed, file=%s\n", path);
+        exit(1);
+    }
 
     while((dent = readdir(dir)) != NULL)
     {
@@ -224,40 +320,69 @@ void listdir(DIR *dir, char *path, int *acceptfd, char *buf)
 
         strcpy(tpath, path);
         strcat(tpath, "/");
-
         strcat(tpath, dent->d_name);//generate new path
-        tmpdir = opendir(tpath);
 
-        if(tmpdir == NULL)
+        lstat(tpath, &st);
+        if(S_ISLNK(st.st_mode))
         {
-            /*ENOTDIR: error not dirctory(document)*/
-            if(errno == ENOTDIR)
+            if(param.symlnkmod == *SYMLNK_F)
                 sendfile(tpath, acceptfd, "doc", buf);
+            else
+                sendfile(tpath, acceptfd, "symlink", buf);
         }
-        else
+        else if(S_ISDIR(st.st_mode))
         {
+            tmpdir = opendir(tpath);
             listdir(tmpdir, tpath, acceptfd, buf);
         }
+        else if(S_ISREG(st.st_mode))
+            sendfile(tpath, acceptfd, "doc", buf);
+        else
+        {
+            fprintf(stderr, "Unsupport file type");
+            exit(1);
+        }
     }
+
     closedir(dir);
 }
 
-void handle(int acceptfd, char *buf)
+void start(int acceptfd, char *buf)
 {
     char inputname[PATH_LEN] = { '\0' };
+    struct stat st;
+    int i = 0;
+    int flag;
     while(1)
     {
+        i = 0;
         memset(inputname, 0, sizeof(inputname));
         printf("Please input directory or file you want to transfer: \n>> ");
-        scanf("%s", inputname);
+
+        /*Do not use scanf, or we cannot input Spase character*/
+        while((inputname[i++] = getchar()) != '\n');
+        inputname[i-1] = '\0';
+        errno = 0;  //clear errno
+
+        /*file exist:return 0*/
+        flag = lstat(inputname, &st);
+        if(param.symlnkmod == *SYMLNK_F)
+            flag = stat(inputname, &st);
 
         /*detect whether the file is exist or not*/
-        if(access(inputname, F_OK) != 0)
+        if(errno == ENOENT)
         {
             fprintf(stderr, "File not exist\n");
+            printf("inputname=%s\n", inputname);
             continue;
         }
-        break;
+        else if(flag == 0)
+            break;  //file exist just return
+        else
+        {
+            perror("errno");
+            exit(1);
+        }
     }
 
     if(clock_gettime(CLOCK_REALTIME, &start_t) == -1)
@@ -272,10 +397,8 @@ void handle(int acceptfd, char *buf)
 
     tp = p;
     for(; p>inputname; p--)
-    {
         if(*p == '/')
             break;
-    }
 
     /*remove '/' which might be exist at the end of the inputname*/
     if(*(tp-2) == '/')
@@ -288,24 +411,30 @@ void handle(int acceptfd, char *buf)
     if(p == inputname)
         rel--;
 
-    dir = opendir(inputname);
-    if(dir == NULL)
+    /*Default: not follow the symbol link*/
+    header.type = *SYMLNK_N;
+
+    /*If we add the parameter: -f*/
+    if(param.symlnkmod == *SYMLNK_F)
+        header.type = *SYMLNK_F;
+
+    if(S_ISDIR(st.st_mode))
     {
-        /*errno==ENOTDIR means that the file is not a directory, 
-         *just send it without recursive*/
-        if(errno == ENOTDIR)
-        {
-            if(sendfile(inputname, &acceptfd, "doc", buf) == 1)
-            {
-                printf("Send file successful\n");
-                return;
-            }
-        }
-        perror("errno");
+        dir = opendir(inputname);
+        listdir(dir, inputname, &acceptfd, buf);
     }
-
-
-    listdir(dir, inputname, &acceptfd, buf);
+    else if(S_ISREG(st.st_mode) ||\
+            header.type == *SYMLNK_F)
+    {
+        sendfile(inputname, &acceptfd, "doc", buf);
+    }
+    else if(S_ISLNK(st.st_mode))
+        sendfile(inputname, &acceptfd, "symlink", buf);
+    else
+    {
+        printf("Unsupport file type\n");
+        exit(1);
+    }
 }
 
 void *get_addr(struct sockaddr *sa)
@@ -318,6 +447,7 @@ void *get_addr(struct sockaddr *sa)
 
 void ctrl_c(int singo)
 {
+    /*Actually no need to do this*/
     printf("\nexit...\n");
     exit(0);
 }
@@ -334,6 +464,11 @@ void handler(int signo)
 
 int main(int argc, char **argv)
 {
+    memset(&param, 0, sizeof(param));
+    param.symlnkmod = *SYMLNK_N;
+    if(argc >= 2)
+        extract_argv(argc, argv);
+
     int sockfd, acceptfd;
     struct addrinfo hint, *res, *p;
     struct sigaction sa;
@@ -422,10 +557,12 @@ int main(int argc, char **argv)
     signal(SIGINT, ctrl_c);
 
     socklen_t sockaddr_len = sizeof(stor_addr);
-    printf("Waiting for connect request...\n");
     char *buf = (char *)calloc(BUFLEN, sizeof(char));
 
-    printf("\n!!Please check your buffer length whether eaual to client's, BUFLEN = %d\n\n", BUFLEN);
+    printf("\nImportant Note: BUFLEN=%d\n", BUFLEN);
+    printf("check whether your BUFLEN is equal to client's or not\n\n");
+
+    printf("Waiting for the request...\n");
 
     /*infinite loop, waiting for the connection request*/
     while(1)
@@ -437,7 +574,7 @@ int main(int argc, char **argv)
         {
             perror("accept");
             continue;
-           //accept error, waiting for the next connection requests 
+            //accept error, waiting for the next connection requests 
         }
 
         /*convert a binary address in network byte order into a 
@@ -450,7 +587,7 @@ int main(int argc, char **argv)
         if(fork() == 0) /*child process*/
         {
             close(sockfd);
-            handle(acceptfd, buf);
+            start(acceptfd, buf);
 
             if(clock_gettime(CLOCK_REALTIME, &finish_t) == -1)
                 printf("Got finish time error\n");
@@ -458,7 +595,6 @@ int main(int argc, char **argv)
             printf("time = %.4f\n", ((1.0 * finish_t.tv_sec - start_t.tv_sec) * 1000000000 \
                         + (finish_t.tv_nsec - start_t.tv_nsec)) / 1000000000);
 
-            printf("exited handle\n");
             finish(&acceptfd, buf);
             close(acceptfd);
             printf("Waiting for new request...\n");

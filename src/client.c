@@ -9,24 +9,44 @@
 #include <sys/wait.h>   //waitpid
 #include <netdb.h>      //getaddrinfo
 #include <sys/stat.h>   //mkdir
+#include <dirent.h>     //opendir
 #include <time.h>
+#include <assert.h>
 
-#define END sprintf(NoneUse, "%d", BUFLEN)
+
 #define BACKLOG 5
 #define PORT "2326"
-#define PATH_LEN 256
-#define BUFLEN 4096
+#define PATH_LEN 256*2
+#define BUFLEN 1024*64*1
+#define END sprintf(NoneUse, "%d", BUFLEN)
+
+#define ISDOC     "0"
+#define ISDIR     "1"
+#define ISCONTENT "2"
+#define SYMLNK_F  "3"   //Follow symbol link
+#define SYMLNK_N  "4"   //Does not follow symbol link
+#define UNFINISH  "0"
+#define FINISH    "1"
+#define ALLDONE   "2"
+
+void dsymlink(char*, struct stat*);
+void rdsymlink(char*, DIR*);
+
 
 struct Header{
     char type;      //0:document, 1:directory 2:content
     char flag;      //0:unfinish, 1:finished, 2:all done
-    char len[10];   //the length of content
+    char len[20];   //the length of content
 } header;
 
 struct timespec starttime, endtime;
-char NoneUse[10];
+char NoneUse[20];
 int HEADLEN = sizeof(header);
 int oa = 0; //overwrite all
+
+struct Parameters {
+    char symlnkmod;
+};
 
 void *get_addr(struct sockaddr *sa)
 {
@@ -36,55 +56,123 @@ void *get_addr(struct sockaddr *sa)
     return &(((struct sockaddr_in6*)sa)->sin6_addr);
 }
 
+/*delete symlink*/
+void dsymlink(char *file, struct stat *st)
+{
+     /* Do not put st=NULL behind, we need to judge
+      * it firstly, or it will cause segmentation fault*/
+    if(st == NULL || S_ISLNK(st->st_mode))
+    {
+        if(remove(file) != 0)
+        {
+            perror("errno");
+            exit(1);
+        }
+        printf("Delete symlink %s\n", file);
+    }
+    else if(S_ISDIR(st->st_mode))
+    {
+        DIR *dir;
+        dir = opendir(file);
+        if(dir == NULL)
+        {
+            perror("errno");
+            exit(1);
+        }
+        rdsymlink(file, dir);
+    }
+}
+
+/*recursive delete symlink*/
+void rdsymlink(char *file, DIR *dir)
+{
+    struct dirent *dent;
+    struct stat st;
+    char tpath[PATH_LEN] = { '\0' };
+
+    while((dent = readdir(dir)) != NULL)
+    {
+        /*omit the entrance of current and parent directory*/
+        if(strcmp(dent->d_name, ".") == 0 ||
+                strcmp(dent->d_name, "..") == 0)
+            continue;
+
+        /*generate absoluetly path*/
+        strcpy(tpath, file);
+        strcat(tpath, "/");
+        strcat(tpath, dent->d_name);
+
+        lstat(tpath, &st);
+        dsymlink(tpath, &st);
+
+    }//while loop
+
+    closedir(dir);
+}
+
 void fstatus(char *file)
 {
     char ch;
-    printf("\nIn fstatus function, file = %s\n", file);
+    int flag;
+    struct stat st;
+
     while(1)
     {
-        if(access(file, F_OK) == 0)
+        /*return 0 if file exist*/
+        flag = lstat(file, &st);    
+
+        if(flag == 0)
         {
-            fprintf(stderr, "'%s' already exist\n", file);
-            printf("o(overwrite)/q(quit)/r(rename)/a(overwrite all) file?: ");
-            scanf("%c", &ch);
-            if(ch == 'q')
-                exit(0);
-            else if(ch == 'o')
-                break;
-            else if(ch == 'a')
+            if(oa == 1)
             {
-                oa = 1;
+                dsymlink(file, &st);
                 return;
             }
-            else if(ch == 'r')
-            {
-                printf("Please input new file name: ");
-                scanf("%s", file);
+
+            fprintf(stderr, "'%s' already exist\n", file);
+            printf("o(overwrite)/q(quit)/a(overwrite all) file?: ");
+            scanf("%c", &ch);
+            getchar();
+
+            switch(ch) {
+                case 'q': exit(0);
+                case 'o': dsymlink(file, &st);       return;
+                case 'a': dsymlink(file, &st); oa=1; return;
+
+                default: printf("Input error, ch=%c\n", ch);continue;
             }
-            else
-                continue;
         }
-        else 
-            break;
+        else
+        {
+            /*File not exist, just return*/
+            if(errno == ENOENT) 
+                return;
+            else
+            {
+                perror("errno");
+                exit(1);
+            }
+        }
     }
-    printf("quiting fstatus\n\n");
 }
 
-void writein(int sockfd, FILE *fp, char *buf, char *fname)
+void writein(int sockfd, FILE *fp, char *buf, char *mode)
 {
     int recvlen = 0;
     int writelen = 0;
     int flen = 0;   //finish len
     int remain = 0; //remaining length
     int flag = 1;
-    int wsum = 0;   //write sum
-    int rsum = 0;   //read sum
+    long wsum = 0;   //write sum
+    long rsum = 0;   //read sum
     int i = 0;
-    int times = 0;
+    int loop;
+    char *sympath = NULL;
+    struct stat st;
 
-    header.flag = '0';
+    header.flag = *UNFINISH;
 
-    printf("In writein function\n", buf);
+    printf("In writein function\n");
     while(1)
     {
         flag = 1;
@@ -93,71 +181,76 @@ void writein(int sockfd, FILE *fp, char *buf, char *fname)
         memset(&header, 0, HEADLEN);
 
         /*don't put it into next loop, it will clear the data before it receive all*/
+        loop = 0;
         memset(buf, 0, BUFLEN); 
-        printf("times=%d    ",times++); //log
 
-        int temp = 0;
+        /*Loop until we receive all data in buffer (len=BUFLEN)*/
         while(1)
         {
-            printf("loop=%d    ", temp++);  //log
-
             if((recvlen = recv(sockfd, buf+flen, remain, 0)) < 0)
                 perror("recv");
-            printf("recvlen=%d", recvlen);
-            printf(" buf=%s\n", buf);
+
+            if(loop>1)
+                printf("\n");
 
             flen = recvlen + flen;  //finish length
             remain = BUFLEN - flen; //remaining length
 
-            /*must enssure we receive fully header or we might be obtain wrong header.len*/
+            /*must enssure we receive full header,
+             *or we might be obtain wrong header.len*/
             if(flag && (flen > HEADLEN))
             {
                 flag = 0;
                 header.flag = buf[1];
 
-                /*buf[0] & buf[1] are both flag. so start from buf[2]*/
+                /*buf[0] & buf[1] are both flag bit and occupying 2 bytes.
+                 *so start from buf[2]*/
                 for(i=0; i<END; i++)
                     header.len[i] = buf[i+2];   
 
                 header.len[END] = '\0';
-
-                if(atoi(header.len) != BUFLEN-HEADLEN)
-                {
-                    if(atoi(header.len) == 0)
-                    {
-                        //printf("buff=%s NULL doc header.len = %d\n",buf, atoi(header.len));
-                        //return;
-                        printf("Oh, god\n");
-                        for(i=0; i<4096; i++)
-                            printf("%c", buf[i]);
-                        exit(1);
-                    }
-                }
+                printf("In writein buf=%s\n", buf); //log
             }
 
             if(remain == 0)
                 break;
-        }
-        rsum += atoi(header.len);
-        if((writelen = fwrite(buf+HEADLEN, sizeof(char),\
-                        atoi(header.len), fp)) != atoi(header.len))
+
+        }//inner loop
+
+        rsum += atoi(header.len); //log
+
+        if(*mode == *SYMLNK_F)
         {
-            perror("fwrite");
-            exit(1);
+            if((writelen = fwrite(buf+HEADLEN, sizeof(char),\
+                            atoi(header.len), fp)) != atoi(header.len))
+            {
+                perror("fwrite");
+                exit(1);
+            }
+        }
+        else
+        {
+            sympath = (char*)fp;
+            /*If the file exists, delete it regardless of the type*/
+            if(lstat(sympath, &st) == 0)
+                dsymlink(sympath, NULL);
+            printf("symlink path=%s sympath=%s\n", buf+HEADLEN, sympath);
+            if(symlink(buf+HEADLEN, sympath) != 0)
+            {
+                fprintf(stderr, "Create symlink failed in writein func\n");
+                exit(1);
+            }
+            printf("Create symlink %s successful\n", buf+HEADLEN);
         }
         wsum = wsum + writelen;
-        printf("\n");
-        //printf("header.len=%d\twritelen=%d\n",atoi(header.len), writelen); //log
 
-        if(header.flag == '1')
-        {
-            printf("\nreceived \'%s\' succussful, quiting writein function\n", fname);
+        if(header.flag == *FINISH)
             break;
-        }
 
-    }
-    printf("write length sum=%d\treceive len sum=%d\n", wsum, rsum);
-    printf("out writein\n");
+    }//outer loop
+
+    if(*mode == *SYMLNK_F)
+        printf("rsum=%ld, wsum=%ld\n", rsum, wsum);
 }
 
 int main(int argc, char **argv)
@@ -229,6 +322,9 @@ int main(int argc, char **argv)
     int remain = 0; /*remaining length*/
     int flen = 0;   /*finish length*/
     int flag = 1;
+    int i = 0;
+
+    FILE *fp;
 
     while(1)
     {
@@ -242,9 +338,7 @@ int main(int argc, char **argv)
         /*Loop until all data is received*/
         while(1)
         {
-            if((recvlen = recv(sockfd, buf+flen, remain, 0)) > 0)
-                buf[HEADLEN-1] = '\0';
-            else
+            if((recvlen = recv(sockfd, buf+flen, remain, 0)) < 0)
             {
                 perror("recv");
                 exit(1);
@@ -265,34 +359,58 @@ int main(int argc, char **argv)
                 break;
         }
 
+        printf("recvlen=%d\n", recvlen);    //log
+
+        buf[HEADLEN-1] = '\0';
         header.flag = buf[1];
         header.type = buf[0];
 
-        if(header.flag == '2')
+        if(header.flag == *ALLDONE)
         {
             printf("\nAll done ^_^\n");
             break;
         }
 
+        printf("Important log: buf=%s\n", buf);         //log
+        printf("Receive Name=%s\n", buf+HEADLEN);   //log
+
         header.len[END] = '\0';
         strcpy(fname, buf+HEADLEN);
-        printf("\nfname = %s\n", fname);
 
-        if(header.type == '0')
+        if(header.type == *ISDOC ||\
+                header.type == *SYMLNK_F)
         {
+            printf("In follow\n");
+
             if(!oa)             /*oa: 'overwrite all' flag*/
                 fstatus(fname); /*detect file status*/
 
-            FILE *fp = fopen(fname, "wb");
+            fp = fopen(fname, "wb");
+            assert(fp != NULL);
 
-            /*receive and write the data into disk*/
-            writein(sockfd, fp, buf, fname); 
+            for(i=0; i<END; i++)
+                header.len[i] = buf[i+2];   
+
+            if(header.len[0] != '0')
+                /*receive and write the data into disk*/
+                writein(sockfd, fp, buf, SYMLNK_F); 
+
             fclose(fp);
-            printf("=========================================================\n");
+            printf("\n\n");
         }
-        else if(header.type == '1')
+        else if(header.type == *SYMLNK_N) 
         {
-            mkdir(fname, 0755);
+            printf("In not follow\n");
+            fstatus(fname);
+            writein(sockfd, (FILE*)fname, buf, SYMLNK_N); 
+        }
+        else if(header.type == *ISDIR)
+        {
+            fstatus(fname);
+            mkdir(fname, 0775);
+            if(access(fname, F_OK) != 0)
+                perror("errno");
+
             continue;
         }
         else
