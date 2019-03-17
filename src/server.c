@@ -66,17 +66,15 @@ void help_info(char *executablefile)
 void extract_argv(int argc,char **argv)
 {
     char *p = NULL;
-    int i=0;
-    for(i=0; i<argc; i++)
+    for(int i=1; i<argc; i++)
     {
         printf("%s\n", argv[i]);
 
         p = argv[i];
-        while(*p)
-        {
-            if(*p == '-')
+        if(*p++ == '-')
+            while( *p )
             {
-                switch(*(p+1))
+                switch( *p )
                 {
                     case 'a': strcpy(param.addr, argv[++i]);     break;
                     case 't': strcpy(param.target, argv[++i]);   break;
@@ -86,12 +84,11 @@ void extract_argv(int argc,char **argv)
                     case 'h': help_info(argv[0]);                exit(0);
 
                     default:
-                              printf("Input error\n"); help_info(argv[0]);
-                              exit(1);
+                          printf("Input error\n"); help_info(argv[0]);
+                          exit(1);
                 }
+                p++;
             }
-            p++;
-        }
     }
 }
 
