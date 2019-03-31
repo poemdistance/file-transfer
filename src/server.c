@@ -56,11 +56,11 @@ struct Parameters {
 void help_info(char *executablefile)
 {
     printf("Usage: %s [option] ...\n\n", executablefile);
-    printf("-s --send. As server to send files\n");
-    printf("-r --receive. As client to receive files\n");
-    printf("-a --address. Must add server address after this option\n");
+    //printf("-s --send. As server to send files\n");
+    //printf("-r --receive. As client to receive files\n");
+    //printf("-a --address. Must add server address after this option\n");
     printf("-f --follow. Following symbol link when transfer a symlink file\n");
-    printf("-t --target. Using for server, assigning the transfer files before connection establish\n");
+    //printf("-t --target. Using for server, assigning the transfer files before connection establish\n");
     printf("-h --help print this help message\n\n");
 }
 void extract_argv(int argc,char **argv)
@@ -71,24 +71,25 @@ void extract_argv(int argc,char **argv)
         printf("%s\n", argv[i]);
 
         p = argv[i];
-        if(*p++ == '-')
+        if(*p++ == '-') {
             while( *p )
             {
                 switch( *p )
                 {
-                    case 'a': strcpy(param.addr, argv[++i]);     break;
-                    case 't': strcpy(param.target, argv[++i]);   break;
-                    case 'r': param.action = RECV;               break;
-                    case 's': param.action = SEND;               break;
+                    //case 'a': strcpy(param.addr, argv[++i]);     break;
+                    //case 't': strcpy(param.target, argv[++i]);   break;
+                    //case 'r': param.action = RECV;               break;
+                    //case 's': param.action = SEND;               break;
                     case 'f': param.symlnkmod  = *SYMLNK_F;      break;
                     case 'h': help_info(argv[0]);                exit(0);
 
                     default:
-                          printf("Input error\n"); help_info(argv[0]);
-                          exit(1);
+                              printf("Input error\n"); help_info(argv[0]);
+                              exit(1);
                 }
                 p++;
             }
+        }
     }
 }
 
